@@ -7,6 +7,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from src.s3_storage import upload_file_to_s3, verify_s3_object
 
 import streamlit as st
 
@@ -486,6 +487,30 @@ def import_uploaded_archive(
 
     zip_path = original_directory / uploaded_filename
 
+    # Upload the original WhatsApp ZIP to permanent AWS S3 storage first.
+    uploaded_file.seek(0)
+
+    s3_object_key = upload_file_to_s3(
+        file_object=uploaded_file,
+        filename=uploaded_filename,
+        property_name=cleaned_property_name,
+        content_type=getattr(uploaded_file, "type", None),
+    )
+
+    # Verify that AWS received the complete file.
+    s3_verification = verify_s3_object(s3_object_key)
+    expected_size = len(uploaded_file.getbuffer())
+    stored_size = int(s3_verification["ContentLength"])
+
+    if stored_size != expected_size:
+        raise RuntimeError(
+            "The AWS backup could not be verified because the uploaded "
+            "file size does not match the stored file size."
+        )
+
+    # Reset the uploaded file before saving a temporary local processing copy.
+    uploaded_file.seek(0)
+
     save_uploaded_zip(
         uploaded_file=uploaded_file,
         destination_path=zip_path,
@@ -538,6 +563,8 @@ def import_uploaded_archive(
         "media_missing": media_results["missing"],
         "media_errors": media_results["errors"],
         "import_directory": str(import_directory),
+        "s3_object_key": s3_object_key,
+        "s3_size_bytes": stored_size,
     }
 
 
@@ -773,6 +800,18 @@ The system will automatically:
                         f"{results['property_name']} "
                         "was imported successfully."
                     )
+
+                    st.success(
+                        "✅ Original WhatsApp ZIP backed up and verified in AWS S3."
+                    )
+
+                    st.caption(
+                        f"AWS backup size: "
+                        f"{results['s3_size_bytes'] / (1024 * 1024):.2f} MB"
+                    )
+
+                    with st.expander("AWS backup details"):
+                        st.code(results["s3_object_key"])
 
                     result_columns = st.columns(4)
 
